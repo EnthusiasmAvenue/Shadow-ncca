@@ -16,8 +16,15 @@ from model import ScorePredictor
 
 load_dotenv()
 
-app = Flask(__name__)
+app = Flask(__name__, 
+            template_folder=os.path.join(os.path.dirname(__file__), 'templates'),
+            static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'shadow_ncca_secret_v1')
+
+@app.errorhandler(500)
+def internal_error(error):
+    import traceback
+    return f"500 Error: {str(error)}<br><pre>{traceback.format_exc()}</pre>", 500
 
 @app.before_request
 def check_access():
@@ -107,8 +114,6 @@ def startup_load_stats():
         mock_loader.build_team_bias_from_db()
         mock_loader.analyze_prediction_performance()
 
-startup_load_stats()
-
 # Improved check for model readiness
 def check_model_ready():
     if not predictor.is_trained: return False
@@ -124,15 +129,36 @@ def check_model_ready():
         return False
     return True
 
-if not check_model_ready():
-    print("Training initial model (scaler or features missing)...")
-    db_df = mock_loader.fetch_db_training_data(min_rows=50)
-    if not db_df.empty:
-        X, y = mock_loader.prepare_features(db_df)
-    else:
-        history_df = mock_loader.fetch_historical_data(num_games=500)
-        X, y = mock_loader.prepare_features(history_df)
-    predictor.train(X, y)
+@app.route('/healthz')
+def healthz():
+    try:
+        # Check DB
+        session.query(Game).limit(1).all()
+        # Check Model
+        model_ready = check_model_ready()
+        return {
+            "status": "ok",
+            "database": "connected",
+            "model_ready": model_ready,
+            "python_version": sys.version
+        }, 200
+    except Exception as e:
+        return {"status": "error", "message": str(e)}, 500
+
+# Wrap startup logic to prevent crash
+try:
+    startup_load_stats()
+    if not check_model_ready():
+        print("Training initial model (scaler or features missing)...")
+        db_df = mock_loader.fetch_db_training_data(min_rows=50)
+        if not db_df.empty:
+            X, y = mock_loader.prepare_features(db_df)
+        else:
+            history_df = mock_loader.fetch_historical_data(num_games=500)
+            X, y = mock_loader.prepare_features(history_df)
+        predictor.train(X, y)
+except Exception as e:
+    print(f"STARTUP ERROR: {e}")
 
 @app.route('/')
 def home():
