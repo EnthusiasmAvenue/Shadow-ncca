@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+*.pyo
+*.pyd
+*.tmp
+*.log
+ncaa_predictions.db
+.env
+/.git
+/.github
