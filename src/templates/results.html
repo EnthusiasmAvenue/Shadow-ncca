@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="results-page">
+    <h2>Enter Final Scores</h2>
+    <p>Update completed games so the bot can grade past predictions.</p>
+
+    {% if games %}
+    <form method="post">
+        <div class="table-responsive">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Matchup</th>
+                        <th>Bookmaker Line (Total)</th>
+                        <th>Away Score</th>
+                        <th>Home Score</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for game in games %}
+                    <tr>
+                        <td>{{ game.date|wat_time }} WAT</td>
+                        <td>{{ game.team_away }} @ {{ game.team_home }}</td>
+                        <td>{{ game.over_under_line }} pts</td>
+                        <td>
+                            <input 
+                                type="number" 
+                                name="score_away_{{ game.id }}" 
+                                min="0" 
+                                value="{{ game.score_away or '' }}"
+                            >
+                        </td>
+                        <td>
+                            <input 
+                                type="number" 
+                                name="score_home_{{ game.id }}" 
+                                min="0" 
+                                value="{{ game.score_home or '' }}"
+                            >
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <button type="submit" class="btn primary">Save Results</button>
+    </form>
+    {% else %}
+        <p>No open games waiting for results.</p>
+    {% endif %}
+</div>
+{% endblock %}

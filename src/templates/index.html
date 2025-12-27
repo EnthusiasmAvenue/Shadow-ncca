@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="hero">
+    <h2>Welcome to the Prediction Engine</h2>
+    <p>Predict NCAA Basketball Over/Under outcomes with AI.</p>
+    
+    <div class="actions">
+        <a href="/predict" class="btn primary">View Predictions</a>
+        
+        <form action="/auto-update" method="post" style="display: inline;">
+            <button type="submit" class="btn secondary">Update Scores</button>
+        </form>
+    </div>
+
+    {% if stats %}
+    <div class="stats-dashboard">
+        <div class="stat-card">
+            <h3>{{ stats.accuracy }}%</h3>
+            <p>Model Accuracy</p>
+        </div>
+        <div class="stat-card">
+            <h3>{{ stats.total_preds }}</h3>
+            <p>Predictions Made</p>
+        </div>
+        <div class="stat-card">
+            <h3>{{ stats.total_games }}</h3>
+            <p>Games Tracked</p>
+        </div>
+    </div>
+    <p class="last-update">Last system check: {{ stats.last_update }}</p>
+    {% endif %}
+</div>
+{% endblock %}

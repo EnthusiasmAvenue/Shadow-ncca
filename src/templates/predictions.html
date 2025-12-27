@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="predictions-page">
+    <h2>Upcoming Game Predictions</h2>
+    <p class="source-tag">Data Source: <strong>{{ source }}</strong></p>
+    <form method="get" action="/predict" style="margin: 10px 0;">
+        <label>Pick:
+            <select name="pick">
+                <option value="">Any</option>
+                <option value="Over">Over</option>
+                <option value="Under">Under</option>
+            </select>
+        </label>
+        <label style="margin-left: 10px;">Min Confidence:
+            <input type="number" step="0.1" name="min_conf" style="width: 80px;">
+        </label>
+        <button type="submit" class="btn secondary" style="margin-left: 10px;">Filter</button>
+    </form>
+
+    {% if predictions %}
+        <div class="table-responsive">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Matchup</th>
+                        <th>Date</th>
+                        <th>Bookmaker Line (Total)</th>
+                        <th>AI Predicted Total</th>
+                        <th>AI Pick</th>
+                        <th>Confidence %</th>
+                        <th>Analysis</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for pred in predictions %}
+                    <tr class="{{ pred.decision|lower }}">
+                        <td>{{ pred.matchup }}</td>
+                        <td>{{ pred.date|wat_time }} WAT</td>
+                        <td>{{ pred.line }} pts</td>
+                        <td>{{ pred.predicted_total }} pts</td>
+                        <td class="decision">
+                            {{ pred.decision }} 
+                            <span style="font-size: 0.8em; color: #666;">
+                                (by {{ pred.diff|abs }} pts)
+                            </span>
+                        </td>
+                        <td>
+                            <div class="confidence-bar-container" style="background: #ddd; border-radius: 4px; width: 100px; height: 10px; display: inline-block; margin-right: 5px;">
+                                <div class="confidence-bar" style="background: #2c3e50; height: 100%; border-radius: 4px; width: {{ pred.confidence }}"></div>
+                            </div>
+                            {{ pred.confidence }}
+                        </td>
+                        <td style="font-size: 0.85em; max-width: 250px; line-height: 1.2;">
+                            {{ pred.explanation }}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% else %}
+        <p>No games found at this time.</p>
+    {% endif %}
+</div>
+{% endblock %}

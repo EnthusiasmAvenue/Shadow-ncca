@@ -1,0 +1,12 @@
+pandas
+scikit-learn
+sqlalchemy
+requests
+numpy
+python-dotenv
+gunicorn
+psycopg2-binary
+cloud-sql-python-connector[pg8000]
+pg8000
+flask
+werkzeug

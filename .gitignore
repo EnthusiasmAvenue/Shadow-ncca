@@ -1,0 +1,27 @@
+# Local database and model
+ncaa_predictions.db
+test_ncaa.db
+model.pkl
+last_train.txt
+
+# Logs
+*.log
+app_log.txt
+server_log.txt
+output.txt
+backtest_debug.txt
+backtest_output.txt
+test_result.txt
+
+# Python
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+
+# Deployment scripts (optional to ignore, but good for clean repo)
+deploy_cloud_run.ps1
+fly.toml
+Dockerfile
+.dockerignore
