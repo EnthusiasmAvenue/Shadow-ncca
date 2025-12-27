@@ -1,5 +1,10 @@
 from flask import Flask, render_template, request, flash, session, redirect, url_for
 import os
+import sys
+
+# Add the current directory to sys.path so it can find database, data_loader, etc.
+sys.path.append(os.path.dirname(__file__))
+
 import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
