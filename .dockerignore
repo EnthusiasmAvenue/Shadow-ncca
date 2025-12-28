@@ -6,7 +6,7 @@ __pycache__/
 *.pyd
 *.tmp
 *.log
-ncaa_predictions.db
+# ncaa_predictions.db included for state sync
 .env
 /.git
 /.github
