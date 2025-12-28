@@ -96,22 +96,46 @@ else:
 
 # Ensure model is trained AND team stats are loaded on startup
 def startup_load_stats():
+    import os
+    print(f"DEBUG: Current Working Directory: {os.getcwd()}")
+    print(f"DEBUG: __file__: {__file__}")
+    print(f"DEBUG: BASE_DIR: {BASE_DIR}")
+    
+    # List files in BASE_DIR for debugging
+    try:
+        print(f"DEBUG: Files in BASE_DIR: {os.listdir(BASE_DIR)}")
+    except Exception as e:
+        print(f"DEBUG: Could not list BASE_DIR: {e}")
+
     csv_paths = [
         os.path.join(BASE_DIR, 'team_stats.csv'),
+        os.path.join(os.getcwd(), 'team_stats.csv'),
+        os.path.join(SRC_DIR, 'team_stats.csv'),
         os.path.join(SRC_DIR, 'data', 'team_stats.csv'),
         'team_stats.csv'
     ]
     loaded = False
     for p in csv_paths:
-        if os.path.exists(p):
-            print(f"Attempting to load team stats from: {os.path.abspath(p)}")
-            if mock_loader.load_team_stats_from_csv(p):
+        abs_p = os.path.abspath(p)
+        if os.path.exists(abs_p):
+            print(f"Attempting to load team stats from: {abs_p}")
+            if mock_loader.load_team_stats_from_csv(abs_p):
                 print(f"Successfully loaded {len(mock_loader.team_stats)} teams from CSV.")
                 loaded = True
                 break
     
     if not loaded:
-        print("CRITICAL: No team_stats.csv found! Model will have no baseline data.")
+        print("CRITICAL: No team_stats.csv found in any of the searched paths!")
+        # Fallback: try to find it anywhere in the project
+        print("Searching for team_stats.csv recursively...")
+        for root, dirs, files in os.walk(BASE_DIR):
+            if 'team_stats.csv' in files:
+                target = os.path.join(root, 'team_stats.csv')
+                print(f"Found it at: {target}")
+                if mock_loader.load_team_stats_from_csv(target):
+                    print(f"Successfully loaded {len(mock_loader.team_stats)} teams from recursive search.")
+                    loaded = True
+                    break
 
     # Also load stats from DB if available
     db_df = mock_loader.fetch_db_training_data(min_rows=1)
@@ -779,13 +803,26 @@ def reload_stats():
     from flask import redirect
     csv_paths = [
         os.path.join(BASE_DIR, 'team_stats.csv'),
-        os.path.join(SRC_DIR, 'data', 'team_stats.csv')
+        os.path.join(os.getcwd(), 'team_stats.csv'),
+        os.path.join(SRC_DIR, 'team_stats.csv'),
+        os.path.join(SRC_DIR, 'data', 'team_stats.csv'),
+        'team_stats.csv'
     ]
     for p in csv_paths:
-        if os.path.exists(p) and mock_loader.load_team_stats_from_csv(p):
-            flash("Team stats reloaded from CSV.")
+        abs_p = os.path.abspath(p)
+        if os.path.exists(abs_p) and mock_loader.load_team_stats_from_csv(abs_p):
+            flash(f"Team stats reloaded from {abs_p}")
             return redirect('/')
-    flash("No team_stats.csv found.")
+    
+    # Final recursive fallback
+    for root, dirs, files in os.walk(BASE_DIR):
+        if 'team_stats.csv' in files:
+            target = os.path.join(root, 'team_stats.csv')
+            if mock_loader.load_team_stats_from_csv(target):
+                flash(f"Team stats reloaded from recursive search: {target}")
+                return redirect('/')
+
+    flash("No team_stats.csv found in any expected location.")
     return redirect('/')
 
 if __name__ == '__main__':
