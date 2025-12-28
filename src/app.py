@@ -18,7 +18,8 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY', 'shadow_ncca_secret_v1')
 
 @app.route('/healthz')
 def healthz():
-    return {"status": "ok", "message": "Port bound, initialization in background"}, 200
+    # Render's health check should be ultra-fast and never trigger imports
+    return {"status": "ok", "message": "Port bound"}, 200
 
 @app.route('/startup-status')
 def startup_status():
@@ -59,29 +60,26 @@ def internal_error(error):
 
 @app.before_request
 def setup_and_check_access():
-    # 1. Initialize components if needed (fast if already done)
-    if not request.path.startswith('/static') and request.path != '/healthz':
+    # Bypass auth and lazy loading for static files, health checks, and status
+    if request.path.startswith('/static') or request.path in ['/healthz', '/startup-status', '/login']:
+        return
+
+    # 1. Access control (Fast check)
+    access_key = os.getenv('ACCESS_KEY')
+    if access_key and session.get('authorized') != access_key:
+        return redirect(url_for('login'))
+
+    # 2. Lazy loading (only if authorized and not a static/health path)
+    if not imports_loaded:
+        # If imports aren't ready, we don't want to block the request thread and hit OOM
+        # But we also can't show the page. 
+        # For now, let's try to load them but with a warning.
+        print(f"Request to {request.path} triggered lazy loading...")
         try:
             get_loaders()
             get_predictor()
         except Exception as e:
-            print(f"Lazy loading error in before_request: {e}")
-
-    # 2. Access control
-    # Bypass auth for static files, health checks, and the login page itself
-    if request.path.startswith('/static') or request.path == '/healthz' or request.path == '/login':
-        return
-    
-    access_key = os.getenv('ACCESS_KEY')
-    if not access_key:
-        return # No access key set, app is public
-
-    # Check if user is authorized in session
-    if session.get('authorized') == access_key:
-        return
-
-    # Otherwise redirect to login
-    return redirect(url_for('login'))
+            print(f"Lazy loading error: {e}")
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -115,11 +113,10 @@ init_lock = threading.Lock()
 
 def get_db_session():
     global db_session, imports_loaded
-    if not imports_loaded:
-        load_heavy_imports()
-        imports_loaded = True
-    global db_session
     with init_lock:
+        if not imports_loaded:
+            load_heavy_imports()
+            imports_loaded = True
         if db_session is None:
             try:
                 db_session = init_db()
@@ -129,18 +126,31 @@ def get_db_session():
     return db_session
 
 def get_predictor():
-    global predictor
+    global predictor, imports_loaded
     with init_lock:
+        if not imports_loaded:
+            load_heavy_imports()
+            imports_loaded = True
         if predictor is None:
             predictor = ScorePredictor()
     return predictor
 
 def get_loaders():
-    global mock_loader, api_loader, current_loader, db_session
+    global mock_loader, api_loader, current_loader, db_session, imports_loaded
     with init_lock:
+        if not imports_loaded:
+            load_heavy_imports()
+            imports_loaded = True
         if mock_loader is None:
             if db_session is None:
-                db_session = get_db_session()
+                # Inside lock already, but get_db_session also locks. 
+                # Re-entrant locks or just direct call? 
+                # Let's just do it directly here since we have the lock.
+                try:
+                    db_session = init_db()
+                except Exception as e:
+                    print(f"DATABASE CONNECTION ERROR in get_loaders: {e}")
+            
             mock_loader = DataLoader(db_session)
             api_key = os.getenv('ODDS_API_KEY')
             if api_key:
