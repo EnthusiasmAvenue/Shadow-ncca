@@ -18,6 +18,7 @@ class DataLoader:
         def try_parse(df):
             cols = set(df.columns)
             if {'team', 'off', 'def', 'pace'}.issubset(cols):
+                print(f"Parsed CSV using schema: team/off/def/pace")
                 self.csv_team_stats = {r['team']: {'off': float(r['off']), 'def': float(r['def']), 'pace': float(r['pace'])} for _, r in df.iterrows()}
                 self.team_stats = self.csv_team_stats.copy() # Initial load
                 self.global_stats = {
@@ -27,6 +28,7 @@ class DataLoader:
                 }
                 return True
             if {'School', 'G', 'Tm.', 'Opp.'}.issubset(cols) or {'Team', 'G', 'Tm.', 'Opp.'}.issubset(cols):
+                print(f"Parsed CSV using schema: SportsReference (School/Tm./Opp.)")
                 name_col = 'School' if 'School' in cols else 'Team'
                 g = pd.to_numeric(df['G'], errors='coerce')
                 tm = pd.to_numeric(df['Tm.'], errors='coerce')
@@ -52,17 +54,23 @@ class DataLoader:
                 }
                 return True
             if {'team_home', 'team_away', 'score_home', 'score_away'}.issubset(cols):
+                print(f"Parsed CSV using schema: Game History (home/away/score)")
                 self.build_team_stats(df)
                 return True
+            print(f"Failed to parse CSV. Columns found: {cols}")
             return False
+
         try:
+            print(f"Attempting to read CSV from: {path}")
             df = pd.read_csv(path)
             if try_parse(df):
                 return True
+            print("Trying with header=1 (skipping first row)...")
             df2 = pd.read_csv(path, header=1)
             if try_parse(df2):
                 return True
-        except Exception:
+        except Exception as e:
+            print(f"Error reading CSV: {e}")
             return False
         return False
     
@@ -271,23 +279,28 @@ class DataLoader:
                 'sigma': float(max(0, (v['sum_sq'] / c) - (v['sum'] / c) ** 2) ** 0.5) if c > 0 else 0.0
             }
 
-    def fetch_upcoming_games(self, num_games=5):
+    def fetch_upcoming_games(self, num_games=10):
         """
-        Simulates fetching upcoming games schedule.
+        Simulates fetching upcoming games schedule using UTC dates.
         """
         data = []
-        teams = ['Duke', 'UNC', 'Kansas', 'Kentucky', 'UCLA', 'Villanova', 'Gonzaga', 'Baylor']
+        teams = ['Duke', 'UNC', 'Kansas', 'Kentucky', 'UCLA', 'Villanova', 'Gonzaga', 'Baylor', 'Arizona', 'Purdue']
         
-        today = datetime.now()
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo("UTC"))
         
-        for _ in range(num_games):
+        for i in range(num_games):
             home, away = random.sample(teams, 2)
             # Bookmaker line estimation
             over_under_line = 145.5 + np.random.normal(0, 5) 
             over_under_line = round(over_under_line * 2) / 2
             
+            # Mix of games: some today, some tomorrow, some day after
+            days_out = (i % 3) 
+            game_time = today + timedelta(days=days_out, hours=random.randint(2, 20))
+            
             data.append({
-                'date': today + timedelta(days=random.randint(1, 3)),
+                'date': game_time,
                 'team_home': home,
                 'team_away': away,
                 'over_under_line': over_under_line
