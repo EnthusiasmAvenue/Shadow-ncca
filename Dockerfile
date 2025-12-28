@@ -6,4 +6,4 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
 ENV PORT=5000
-CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:${PORT}", "src.app:app"]
+CMD gunicorn --workers 2 --bind 0.0.0.0:$PORT src.app:app
