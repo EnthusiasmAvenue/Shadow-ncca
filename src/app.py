@@ -63,7 +63,14 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 SRC_DIR = os.path.dirname(__file__)
 
 # Initialize components
-db_session = init_db()
+def get_db_session():
+    try:
+        return init_db()
+    except Exception as e:
+        print(f"DATABASE CONNECTION ERROR: {e}")
+        return None
+
+db_session = get_db_session()
 predictor = ScorePredictor()
 api_key = os.getenv('ODDS_API_KEY')
 tz_wat = ZoneInfo("Africa/Lagos")
@@ -222,39 +229,69 @@ def background_initialization():
 
 # Run initialization in a thread to not block gunicorn port binding
 import threading
-threading.Thread(target=background_initialization, daemon=True).start()
+import time
+
+def singleton_background_initialization():
+    # Simple file lock to ensure only one worker runs initialization
+    lock_file = "init.lock"
+    
+    # On Render, the filesystem is ephemeral, so this works for process synchronization
+    # across workers in the same container.
+    if os.path.exists(lock_file):
+        # Check if the lock is old (e.g., > 10 mins) in case of a crash
+        if time.time() - os.path.getmtime(lock_file) < 600:
+            print("Initialization already in progress by another worker. Skipping.")
+            return
+            
+    try:
+        with open(lock_file, "w") as f:
+            f.write(str(os.getpid()))
+        
+        background_initialization()
+        
+        # Keep the lock file but update it
+        with open(lock_file, "w") as f:
+            f.write("done")
+    except Exception as e:
+        print(f"Locking error: {e}")
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
+
+print("Starting background initialization thread...")
+threading.Thread(target=singleton_background_initialization, daemon=True).start()
 
 @app.route('/')
 def home():
     # Fetch some summary stats for the home page
-    try:
-        total_games = db_session.query(Game).filter(Game.status == 'finished').count()
-        total_preds = db_session.query(Prediction).join(Game).filter(Game.status == 'finished').count()
-        
-        # Calculate accuracy
-        wins = 0
-        all_finished = db_session.query(Prediction).join(Game).filter(Game.status == 'finished').all()
-        for p in all_finished:
-            if p.predicted_class == p.game.result:
-                wins += 1
-        
-        accuracy = (wins / total_preds * 100) if total_preds > 0 else 0
-        
-        stats = {
-            'total_games': total_games,
-            'total_preds': total_preds,
-            'accuracy': round(accuracy, 1),
-            'last_update': datetime.now(tz_wat).strftime("%Y-%m-%d %H:%M")
-        }
-    except Exception as e:
-        print(f"Error fetching home stats: {e}")
-        stats = {
-            'total_games': 0,
-            'total_preds': 0,
-            'accuracy': 0.0,
-            'last_update': datetime.now(tz_wat).strftime("%Y-%m-%d %H:%M")
-        }
-
+    stats = {
+        'total_games': 0,
+        'total_preds': 0,
+        'accuracy': 0,
+        'last_update': datetime.now(tz_wat).strftime("%Y-%m-%d %H:%M")
+    }
+    
+    if db_session:
+        try:
+            total_games = db_session.query(Game).filter(Game.status == 'finished').count()
+            total_preds = db_session.query(Prediction).join(Game).filter(Game.status == 'finished').count()
+            
+            # Calculate accuracy
+            wins = 0
+            all_finished = db_session.query(Prediction).join(Game).filter(Game.status == 'finished').all()
+            for p in all_finished:
+                if p.predicted_class == p.game.result:
+                    wins += 1
+            
+            accuracy = (wins / total_preds * 100) if total_preds > 0 else 0
+            
+            stats.update({
+                'total_games': total_games,
+                'total_preds': total_preds,
+                'accuracy': round(accuracy, 1)
+            })
+        except Exception as e:
+            print(f"Error fetching home stats: {e}")
+    
     return render_template('index.html', stats=stats)
 
 @app.route('/predict')
@@ -844,4 +881,6 @@ def reload_stats():
     return redirect('/')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    # When running locally
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
