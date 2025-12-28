@@ -98,18 +98,25 @@ else:
 def startup_load_stats():
     csv_paths = [
         os.path.join(BASE_DIR, 'team_stats.csv'),
-        os.path.join(SRC_DIR, 'data', 'team_stats.csv')
+        os.path.join(SRC_DIR, 'data', 'team_stats.csv'),
+        'team_stats.csv'
     ]
     loaded = False
     for p in csv_paths:
         if os.path.exists(p):
+            print(f"Attempting to load team stats from: {os.path.abspath(p)}")
             if mock_loader.load_team_stats_from_csv(p):
+                print(f"Successfully loaded {len(mock_loader.team_stats)} teams from CSV.")
                 loaded = True
                 break
     
+    if not loaded:
+        print("CRITICAL: No team_stats.csv found! Model will have no baseline data.")
+
     # Also load stats from DB if available
     db_df = mock_loader.fetch_db_training_data(min_rows=1)
     if not db_df.empty:
+        print(f"Found {len(db_df)} games in database. Updating team stats...")
         mock_loader.build_team_stats(db_df)
         mock_loader.build_team_bias_from_db()
         mock_loader.analyze_prediction_performance()
@@ -136,10 +143,12 @@ def healthz():
         db_session.query(Game).limit(1).all()
         # Check Model
         model_ready = check_model_ready()
+        
         return {
             "status": "ok",
             "database": "connected",
             "model_ready": model_ready,
+            "teams_loaded": len(mock_loader.team_stats),
             "python_version": sys.version
         }, 200
     except Exception as e:
@@ -150,16 +159,24 @@ def background_initialization():
     try:
         startup_load_stats()
         if not check_model_ready():
-            print("Training initial model (scaler or features missing)...")
+            print("Model not ready. Starting initial training sequence...")
             db_df = mock_loader.fetch_db_training_data(min_rows=50)
             if not db_df.empty:
+                print(f"Training on {len(db_df)} database games.")
                 X, y = mock_loader.prepare_features(db_df)
             else:
+                print("Database empty. Generating 500 simulated games for initial training...")
                 history_df = mock_loader.fetch_historical_data(num_games=500)
                 X, y = mock_loader.prepare_features(history_df)
-            predictor.train(X, y)
+            
+            mae = predictor.train(X, y)
+            print(f"Initial training complete. Model MAE: {mae:.2f}")
+        else:
+            print("Model loaded and ready for predictions.")
     except Exception as e:
+        import traceback
         print(f"STARTUP ERROR: {e}")
+        print(traceback.format_exc())
 
 # Run initialization in a thread to not block gunicorn port binding
 import threading
@@ -189,7 +206,12 @@ def home():
         }
     except Exception as e:
         print(f"Error fetching home stats: {e}")
-        stats = None
+        stats = {
+            'total_games': 0,
+            'total_preds': 0,
+            'accuracy': 0.0,
+            'last_update': datetime.now(tz_wat).strftime("%Y-%m-%d %H:%M")
+        }
 
     return render_template('index.html', stats=stats)
 
@@ -225,25 +247,9 @@ def predict():
                 predictor.train(X, y)
                 with open(last_train_file, 'w') as f:
                     f.write(datetime.now().isoformat())
-        # Clear today's predictions from the DB to force a refresh
-        try:
-            from datetime import time
-            today_start = datetime.combine(datetime.now().date(), time.min)
-            today_end = datetime.combine(datetime.now().date(), time.max)
-            
-            preds_to_delete = (
-                db_session.query(Prediction)
-                .join(Game)
-                .filter(Game.date >= today_start, Game.date <= today_end)
-                .all()
-            )
-            print(f"Found {len(preds_to_delete)} predictions to clear")
-            for p in preds_to_delete:
-                db_session.delete(p)
-            db_session.commit()
-        except Exception as e:
-            db_session.rollback()
-            print(f"Error clearing today's predictions: {e}")
+        # Clear old logs if they get too big
+        if os.path.exists('output.txt') and os.path.getsize('output.txt') > 1024 * 1024:
+            with open('output.txt', 'w') as f: f.write("Log rotated\n")
 
         pick_filter = request.args.get('pick')
         conf_min = request.args.get('min_conf')
@@ -258,27 +264,36 @@ def predict():
             print(f"Dedupe error: {e}")
         
         print("Fetching games...")
-        if api_loader:
-            games_df = api_loader.fetch_upcoming_games()
-            source = "Real-Time API"
-        else:
-            games_df = mock_loader.fetch_upcoming_games()
-            source = "Mock Simulation"
+        # Try to fetch games
+        try:
+            if api_loader:
+                games_df = api_loader.fetch_upcoming_games()
+                source = "Real-Time API"
+            else:
+                # If no API key, we show nothing (no mock games as requested)
+                games_df = pd.DataFrame()
+                source = "No Data Source"
+        except Exception as e:
+            print(f"Error fetching games: {e}")
+            games_df = pd.DataFrame()
+            source = "Error"
 
-        print(f"Fetched {len(games_df)} games")
+        print(f"Fetched {len(games_df)} games from {source}")
         predictions = []
         
+        # Relax the time filter to show games from 12 hours ago to 72 hours in the future
+        now_utc = datetime.now(ZoneInfo("UTC"))
+        start_limit = now_utc - timedelta(hours=12)
+        end_limit = now_utc + timedelta(hours=72)
+        
+        print(f"Filtering games between {start_limit} and {end_limit}")
+        
         if not games_df.empty:
-            now_utc = datetime.now(ZoneInfo("UTC"))
-            # Show games starting between now and 48 hours from now
-            limit_future = now_utc + timedelta(hours=48)
-            
             for i, row in games_df.iterrows():
-                print(f"Processing game {i+1}/{len(games_df)}: {row['team_home']} vs {row['team_away']}")
                 # Skip games without a line
                 line_val = row.get('over_under_line')
                 if pd.isna(line_val) or line_val is None:
-                    print(f"Skipping game {i+1} due to missing line")
+                    print(f"Skipping {row.get('team_home')} vs {row.get('team_away')} - No Line")
                     continue
                     
                 dt = pd.to_datetime(row['date'])
@@ -287,11 +302,12 @@ def predict():
                 else:
                     dt = dt.astimezone(ZoneInfo("UTC"))
                 
-                # Filter: only show games starting in the next 20 hours (covers tonight and tomorrow morning)
-                if not (now_utc <= dt <= limit_future):
+                if not (start_limit <= dt <= end_limit):
+                    print(f"Skipping {row.get('team_home')} vs {row.get('team_away')} - Outside time range ({dt})")
                     continue
                 
-                game_date = dt # Already converted to UTC datetime object above
+                print(f"Processing game: {row['team_home']} vs {row['team_away']} at {dt}")
+                game_date = dt
 
                 game = db_session.query(Game).filter_by(
                     date=game_date,
