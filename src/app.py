@@ -66,6 +66,10 @@ background_init_started = False
 
 load_dotenv()
 
+@app.context_processor
+def inject_vars():
+    return {'os_getenv': os.getenv}
+
 @app.errorhandler(500)
 def internal_error(error):
     import traceback
@@ -654,124 +658,133 @@ def history():
         else: continue
 
         all_records.append({
+            'id': prediction.id,
             'date': game.date,
             'matchup': f"{game.team_home} vs {game.team_away}",
             'line': game.over_under_line,
-            'predicted_total': prediction.predicted_total,
-            'predicted_class': prediction.predicted_class,
-            'confidence': prediction.confidence,
-            'total_score': game.total_score if game.total_score is not None else 0,
-            'final_result': final_result,
-            'status': getattr(game, 'status', 'finished'),
+            'predicted_total': round(prediction.predicted_total, 1),
+            'decision': prediction.predicted_class,
+            'confidence': f"{prediction.confidence:.1f}%",
+            'total_score': game.total_score,
+            'result': final_result,
             'outcome': outcome_label,
             'mark': mark,
-            'outcome_class': outcome_class,
+            'class': outcome_class,
             'explanation': prediction.explanation or "No analysis available."
         })
 
-    # Deduplicate records by date/matchup
-    seen = set()
-    unique_all = []
-    for r in all_records:
-        key = (r['date'], r['matchup'])
-        if key not in seen:
-            seen.add(key)
-            unique_all.append(r)
-
-    # 2. Filter for a 24-hour "Current Window" (past 16h to future 12h)
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-    now_utc = datetime.now(ZoneInfo("UTC"))
-    window_start = now_utc - timedelta(hours=16)
-    window_end = now_utc + timedelta(hours=12)
-    
-    def in_display_window(record_date):
-        try:
-            if isinstance(record_date, str):
-                dt = pd.to_datetime(record_date)
-            else:
-                dt = record_date
-            
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-            else:
-                dt = dt.astimezone(ZoneInfo("UTC"))
-            
-            return window_start <= dt <= window_end
-        except Exception:
-            return False
-
-    display_records = [r for r in unique_all if in_display_window(r['date'])]
-    
-    # If no games in window, show the most recent day's games
-    if not display_records and unique_all:
-        latest_date = unique_all[0]['date']
-        latest_dt = pd.to_datetime(latest_date) if isinstance(latest_date, str) else latest_date
-        display_records = [r for r in unique_all if (r['date'] if isinstance(r['date'], str) else r['date'].strftime('%Y-%m-%d')).startswith(latest_dt.strftime('%Y-%m-%d'))]
-
-    # 3. Calculate Overall Stats (from all time)
-    wins_count = len([r for r in unique_all if r['outcome'] == 'Win'])
-    losses_count = len([r for r in unique_all if r['outcome'] == 'Loss'])
-    pushes_count = len([r for r in unique_all if r['final_result'] == 'Push'])
-    total_non_push = wins_count + losses_count
-    total_win_rate = round((wins_count / total_non_push) * 100, 1) if total_non_push > 0 else 0.0
-
-    # 4. Calculate Last Prediction Win Rate
-    # Find the most recent finished prediction result
-    last_finished = [r for r in unique_all if r['outcome'] in ['Win', 'Loss']]
-    if last_finished:
-        last_result = last_finished[0]
-        last_prediction_wr = 100.0 if last_result['outcome'] == 'Win' else 0.0
+    # 2. Filtering Logic
+    filter_type = request.args.get('filter', 'all')
+    if filter_type == 'wins':
+        records = [r for r in all_records if r['outcome'] == 'Win']
+    elif filter_type == 'losses':
+        records = [r for r in all_records if r['outcome'] == 'Loss']
     else:
-        last_prediction_wr = 0.0
+        records = all_records
 
+    # 3. Overall Statistics
     stats = {
-        'win_rate': total_win_rate,
-        'last_prediction_wr': last_prediction_wr,
-        'wins': wins_count,
-        'losses': losses_count,
-        'pushes': pushes_count,
-        'total_pred': total_non_push
+        'total': len([r for r in all_records if r['outcome'] != 'Live' and r['result'] != 'Push']),
+        'wins': len([r for r in all_records if r['outcome'] == 'Win']),
+        'losses': len([r for r in all_records if r['outcome'] == 'Loss']),
+        'accuracy': 0
     }
-    try:
-        from database import Metric
-        m = Metric(mae=None, win_rate=total_win_rate, note="daily")
-        db_session.add(m)
-        db_session.commit()
-    except Exception:
-        pass
+    if stats['total'] > 0:
+        stats['accuracy'] = round((stats['wins'] / stats['total']) * 100, 1)
 
-    team_errors = {}
-    for prediction in all_predictions:
-        g = prediction.game
-        if not g or g.total_score is None:
-            continue
-        err = float(prediction.predicted_total) - float(g.total_score)
-        for team in [g.team_home, g.team_away]:
-            if team not in team_errors:
-                team_errors[team] = {'errs': []}
-            team_errors[team]['errs'].append(err)
+    # 4. Group by Team
+    team_stats = {}
+    for r in all_records:
+        if r['outcome'] == 'Live' or r['result'] == 'Push': continue
+        
+        home, away = r['matchup'].split(' vs ')
+        for team in [home, away]:
+            if team not in team_stats:
+                team_stats[team] = {'wins': 0, 'total': 0}
+            team_stats[team]['total'] += 1
+            if r['outcome'] == 'Win':
+                team_stats[team]['wins'] += 1
+    
     team_rows = []
-    for team, d in team_errors.items():
-        errs = d['errs']
-        c = len(errs)
-        mae = round(sum(abs(e) for e in errs) / c, 2) if c > 0 else 0.0
-        bias = round(sum(errs) / c, 2) if c > 0 else 0.0
-        lastN = errs[:20]
-        lc = len(lastN)
-        last_mae = round(sum(abs(e) for e in lastN) / lc, 2) if lc > 0 else 0.0
-        last_bias = round(sum(lastN) / lc, 2) if lc > 0 else 0.0
+    for team, s in team_stats.items():
+        acc = (s['wins'] / s['total'] * 100) if s['total'] > 0 else 0
         team_rows.append({
-            'team': team,
-            'count': c,
-            'mae': mae,
-            'bias': bias,
-            'last_mae': last_mae,
-            'last_bias': last_bias
+            'name': team,
+            'wins': s['wins'],
+            'total': s['total'],
+            'accuracy': round(acc, 1)
         })
-    team_rows = sorted(team_rows, key=lambda r: r['count'], reverse=True)[:12]
+    team_rows = sorted(team_rows, key=lambda x: x['total'], reverse=True)[:20]
 
-    return render_template('history.html', records=display_records, stats=stats, team_rows=team_rows)
+    return render_template('history.html', 
+                           records=records, 
+                           stats=stats, 
+                           team_rows=team_rows, 
+                           current_filter=filter_type)
+
+
+@app.route('/admin')
+def admin():
+    access_key = os.getenv('ACCESS_KEY')
+    if access_key and session.get('authorized') != access_key:
+        return redirect(url_for('login'))
+    
+    db_path = 'ncaa_predictions.db'
+    db_exists = os.path.exists(db_path)
+    db_size = os.path.getsize(db_path) if db_exists else 0
+    
+    return render_template('admin.html', db_exists=db_exists, db_size=db_size)
+
+@app.route('/admin/download-db')
+def download_db():
+    access_key = os.getenv('ACCESS_KEY')
+    if access_key and session.get('authorized') != access_key:
+        return redirect(url_for('login'))
+        
+    db_path = 'ncaa_predictions.db'
+    if not os.path.exists(db_path):
+        return "Database file not found", 404
+        
+    from flask import send_file
+    return send_file(os.path.abspath(db_path), as_attachment=True)
+
+@app.route('/admin/upload-db', methods=['POST'])
+def upload_db():
+    access_key = os.getenv('ACCESS_KEY')
+    if access_key and session.get('authorized') != access_key:
+        return redirect(url_for('login'))
+        
+    if 'db_file' not in request.files:
+        flash("No file part")
+        return redirect(url_for('admin'))
+        
+    file = request.files['db_file']
+    if file.filename == '':
+        flash("No selected file")
+        return redirect(url_for('admin'))
+        
+    if file and file.filename.endswith('.db'):
+        # Close current session before replacing file
+        global db_session
+        if db_session:
+            try:
+                db_session.close()
+                db_session = None
+            except Exception:
+                pass
+        
+        target_path = 'ncaa_predictions.db'
+        file.save(target_path)
+        flash("Database updated successfully! Please restart the app or wait for lazy re-initialization.")
+        
+        # Trigger re-initialization on next request
+        global imports_loaded
+        imports_loaded = False 
+        
+        return redirect(url_for('admin'))
+    else:
+        flash("Invalid file type. Must be a .db file.")
+        return redirect(url_for('admin'))
 
 @app.route('/export-history.csv', methods=['GET'])
 def export_history_csv():
