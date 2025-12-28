@@ -97,45 +97,63 @@ else:
 # Ensure model is trained AND team stats are loaded on startup
 def startup_load_stats():
     import os
-    print(f"DEBUG: Current Working Directory: {os.getcwd()}")
-    print(f"DEBUG: __file__: {__file__}")
-    print(f"DEBUG: BASE_DIR: {BASE_DIR}")
+    print("--- STARTUP FILE DISCOVERY ---")
+    cwd = os.getcwd()
+    print(f"Current Working Directory: {cwd}")
     
-    # List files in BASE_DIR for debugging
-    try:
-        print(f"DEBUG: Files in BASE_DIR: {os.listdir(BASE_DIR)}")
-    except Exception as e:
-        print(f"DEBUG: Could not list BASE_DIR: {e}")
-
-    csv_paths = [
-        os.path.join(BASE_DIR, 'team_stats.csv'),
-        os.path.join(os.getcwd(), 'team_stats.csv'),
-        os.path.join(SRC_DIR, 'team_stats.csv'),
-        os.path.join(SRC_DIR, 'data', 'team_stats.csv'),
-        'team_stats.csv'
+    # Identify the actual project root (where .git or team_stats.csv should be)
+    # If we are in /opt/render/project/src/src, the root is /opt/render/project/src
+    # If we are in /opt/render/project/src, the root is /opt/render/project/src
+    
+    potential_roots = [
+        cwd,
+        os.path.dirname(cwd),
+        BASE_DIR,
+        os.path.abspath(os.path.join(SRC_DIR, '..'))
     ]
+    
+    csv_paths = []
+    for root in potential_roots:
+        csv_paths.append(os.path.join(root, 'team_stats.csv'))
+    
+    # Add some hardcoded absolute paths common on Render/Docker
+    csv_paths.extend([
+        '/app/team_stats.csv',
+        '/opt/render/project/src/team_stats.csv',
+        'team_stats.csv'
+    ])
+    
+    # Remove duplicates
+    csv_paths = list(dict.fromkeys([os.path.abspath(p) for p in csv_paths]))
+    
     loaded = False
+    print("Searching for team_stats.csv...")
     for p in csv_paths:
-        abs_p = os.path.abspath(p)
-        if os.path.exists(abs_p):
-            print(f"Attempting to load team stats from: {abs_p}")
-            if mock_loader.load_team_stats_from_csv(abs_p):
-                print(f"Successfully loaded {len(mock_loader.team_stats)} teams from CSV.")
+        if os.path.exists(p):
+            print(f"FOUND: {p}")
+            if mock_loader.load_team_stats_from_csv(p):
+                print(f"SUCCESS: Loaded {len(mock_loader.team_stats)} teams from {p}")
                 loaded = True
                 break
+        else:
+            print(f"NOT FOUND at: {p}")
     
     if not loaded:
-        print("CRITICAL: No team_stats.csv found in any of the searched paths!")
-        # Fallback: try to find it anywhere in the project
-        print("Searching for team_stats.csv recursively...")
-        for root, dirs, files in os.walk(BASE_DIR):
-            if 'team_stats.csv' in files:
-                target = os.path.join(root, 'team_stats.csv')
-                print(f"Found it at: {target}")
-                if mock_loader.load_team_stats_from_csv(target):
-                    print(f"Successfully loaded {len(mock_loader.team_stats)} teams from recursive search.")
-                    loaded = True
-                    break
+         print("CRITICAL: team_stats.csv not found in standard paths. Starting deep search...")
+         # Search everywhere from current dir downwards
+         for root, dirs, files in os.walk(os.path.dirname(BASE_DIR) if os.path.exists(os.path.dirname(BASE_DIR)) else BASE_DIR):
+             for f in files:
+                 if f.lower() == 'team_stats.csv':
+                     target = os.path.join(root, f)
+                     print(f"DEEP SEARCH FOUND: {target}")
+                     if mock_loader.load_team_stats_from_csv(target):
+                         print(f"SUCCESS: Loaded {len(mock_loader.team_stats)} teams from deep search.")
+                         loaded = True
+                         break
+             if loaded: break
+    
+    if not loaded:
+        print("ALERT: team_stats.csv is missing from the deployment. Please ensure it is in your GitHub root.")
 
     # Also load stats from DB if available
     db_df = mock_loader.fetch_db_training_data(min_rows=1)
