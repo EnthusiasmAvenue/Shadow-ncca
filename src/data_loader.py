@@ -61,16 +61,20 @@ class DataLoader:
             return False
 
         try:
-            print(f"Attempting to read CSV from: {path}")
-            df = pd.read_csv(path)
+            abs_path = os.path.abspath(path)
+            print(f"--- CSV PARSING: {abs_path} ---")
+            df = pd.read_csv(abs_path)
+            print(f"Columns found (header=0): {df.columns.tolist()[:10]}...")
             if try_parse(df):
                 return True
+            
             print("Trying with header=1 (skipping first row)...")
-            df2 = pd.read_csv(path, header=1)
+            df2 = pd.read_csv(abs_path, header=1)
+            print(f"Columns found (header=1): {df2.columns.tolist()[:10]}...")
             if try_parse(df2):
                 return True
         except Exception as e:
-            print(f"Error reading CSV: {e}")
+            print(f"Error reading CSV at {path}: {e}")
             return False
         return False
     
