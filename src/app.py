@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 from flask import Flask, render_template, request, flash, session, redirect, url_for, g
 from dotenv import load_dotenv
 
@@ -32,9 +33,8 @@ def startup_status():
 
 # Now import the rest lazily
 def load_heavy_imports():
-    global pd, init_db, Game, Prediction, DataLoader, APIDataLoader, ScorePredictor, timedelta
+    global pd, init_db, Game, Prediction, DataLoader, APIDataLoader, ScorePredictor
     import pandas as pd
-    from datetime import timedelta
     from database import init_db, Game, Prediction
     from data_loader import DataLoader
     from api_loader import APIDataLoader
@@ -48,7 +48,6 @@ Prediction = None
 DataLoader = None
 APIDataLoader = None
 ScorePredictor = None
-timedelta = None
 imports_loaded = False
 
 load_dotenv()
