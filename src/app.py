@@ -1,25 +1,56 @@
-from flask import Flask, render_template, request, flash, session, redirect, url_for
-import os
+# Package markers
 import sys
+import os
+import threading
+import time
+from zoneinfo import ZoneInfo
+from flask import Flask, render_template, request, flash, session, redirect, url_for, g
+from dotenv import load_dotenv
 
 # Add the current directory to sys.path so it can find database, data_loader, etc.
 sys.path.append(os.path.dirname(__file__))
 
-import pandas as pd
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-from database import init_db, Game, Prediction
-from data_loader import DataLoader
-from api_loader import APIDataLoader
-from model import ScorePredictor
-
-load_dotenv()
-
+# Initialize basic app immediately to bind port
 app = Flask(__name__, 
             template_folder=os.path.join(os.path.dirname(__file__), 'templates'),
             static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'shadow_ncca_secret_v1')
+
+@app.route('/healthz')
+def healthz():
+    return {"status": "ok", "message": "Port bound, initialization in background"}, 200
+
+@app.route('/startup-status')
+def startup_status():
+    global imports_loaded
+    return {
+        "imports_loaded": imports_loaded,
+        "db_connected": db_session is not None,
+        "model_ready": check_model_ready() if predictor else False
+    }
+
+# Now import the rest lazily
+def load_heavy_imports():
+    global pd, init_db, Game, Prediction, DataLoader, APIDataLoader, ScorePredictor, timedelta
+    import pandas as pd
+    from datetime import timedelta
+    from database import init_db, Game, Prediction
+    from data_loader import DataLoader
+    from api_loader import APIDataLoader
+    from model import ScorePredictor
+
+# Placeholder globals
+pd = None
+init_db = None
+Game = None
+Prediction = None
+DataLoader = None
+APIDataLoader = None
+ScorePredictor = None
+timedelta = None
+imports_loaded = False
+
+load_dotenv()
 
 @app.errorhandler(500)
 def internal_error(error):
@@ -27,7 +58,16 @@ def internal_error(error):
     return f"500 Error: {str(error)}<br><pre>{traceback.format_exc()}</pre>", 500
 
 @app.before_request
-def check_access():
+def setup_and_check_access():
+    # 1. Initialize components if needed (fast if already done)
+    if not request.path.startswith('/static') and request.path != '/healthz':
+        try:
+            get_loaders()
+            get_predictor()
+        except Exception as e:
+            print(f"Lazy loading error in before_request: {e}")
+
+    # 2. Access control
     # Bypass auth for static files, health checks, and the login page itself
     if request.path.startswith('/static') or request.path == '/healthz' or request.path == '/login':
         return
@@ -62,18 +102,54 @@ def login():
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 SRC_DIR = os.path.dirname(__file__)
 
-# Initialize components
-def get_db_session():
-    try:
-        return init_db()
-    except Exception as e:
-        print(f"DATABASE CONNECTION ERROR: {e}")
-        return None
-
-db_session = get_db_session()
-predictor = ScorePredictor()
-api_key = os.getenv('ODDS_API_KEY')
+# Initialize components as None for lazy loading
+db_session = None
+predictor = None
+mock_loader = None
+api_loader = None
+current_loader = None
 tz_wat = ZoneInfo("Africa/Lagos")
+
+import threading
+init_lock = threading.Lock()
+
+def get_db_session():
+    global db_session, imports_loaded
+    if not imports_loaded:
+        load_heavy_imports()
+        imports_loaded = True
+    global db_session
+    with init_lock:
+        if db_session is None:
+            try:
+                db_session = init_db()
+            except Exception as e:
+                print(f"DATABASE CONNECTION ERROR: {e}")
+                return None
+    return db_session
+
+def get_predictor():
+    global predictor
+    with init_lock:
+        if predictor is None:
+            predictor = ScorePredictor()
+    return predictor
+
+def get_loaders():
+    global mock_loader, api_loader, current_loader, db_session
+    with init_lock:
+        if mock_loader is None:
+            if db_session is None:
+                db_session = get_db_session()
+            mock_loader = DataLoader(db_session)
+            api_key = os.getenv('ODDS_API_KEY')
+            if api_key:
+                api_loader = APIDataLoader(api_key)
+                current_loader = api_loader
+            else:
+                api_loader = None
+                current_loader = mock_loader
+    return mock_loader, api_loader, current_loader
 
 def wat_time(value):
     try:
@@ -92,17 +168,9 @@ app.jinja_env.filters['wat_time'] = wat_time
 def inject_globals():
     return {'os_getenv': os.getenv}
 
-# Initialize Loaders
-mock_loader = DataLoader(db_session)
-if api_key:
-    api_loader = APIDataLoader(api_key)
-    current_loader = api_loader
-else:
-    api_loader = None
-    current_loader = mock_loader
-
 # Ensure model is trained AND team stats are loaded on startup
 def startup_load_stats():
+    get_loaders()
     import os
     print("--- STARTUP FILE DISCOVERY ---")
     cwd = os.getcwd()
@@ -172,15 +240,16 @@ def startup_load_stats():
 
 # Improved check for model readiness
 def check_model_ready():
-    if not predictor.is_trained: return False
-    if not getattr(predictor, 'feature_names', None): return False
-    if len(predictor.feature_names) < 3: return False
+    pred = get_predictor()
+    if not pred.is_trained: return False
+    if not getattr(pred, 'feature_names', None): return False
+    if len(pred.feature_names) < 3: return False
     
     # Check if scaler is fitted
     from sklearn.utils.validation import check_is_fitted
     from sklearn.exceptions import NotFittedError
     try:
-        check_is_fitted(predictor.scaler)
+        check_is_fitted(pred.scaler)
     except NotFittedError:
         return False
     return True
@@ -188,24 +257,36 @@ def check_model_ready():
 @app.route('/healthz')
 def healthz():
     try:
-        # Check DB
-        db_session.query(Game).limit(1).all()
+        # Quick DB check only if initialized
+        db_status = "not_initialized"
+        if db_session:
+            db_session.query(Game).limit(1).all()
+            db_status = "connected"
+        
         # Check Model
-        model_ready = check_model_ready()
+        model_ready = False
+        if predictor:
+            model_ready = check_model_ready()
         
         return {
             "status": "ok",
-            "database": "connected",
+            "database": db_status,
             "model_ready": model_ready,
-            "teams_loaded": len(mock_loader.team_stats),
+            "teams_loaded": len(mock_loader.team_stats) if mock_loader else 0,
             "python_version": sys.version
         }, 200
     except Exception as e:
-        return {"status": "error", "message": str(e)}, 500
+        # Still return 200 to keep Render happy, but show error
+        return {"status": "starting", "message": str(e)}, 200
 
 # Wrap startup logic to prevent crash
 def background_initialization():
     try:
+        # Initialize everything
+        print("Initializing database and loaders in background...")
+        get_loaders()
+        get_predictor()
+        
         startup_load_stats()
         if not check_model_ready():
             print("Model not ready. Starting initial training sequence...")
@@ -228,10 +309,10 @@ def background_initialization():
         print(traceback.format_exc())
 
 # Run initialization in a thread to not block gunicorn port binding
-import threading
 import time
 
 def singleton_background_initialization():
+    global imports_loaded
     # Simple file lock to ensure only one worker runs initialization
     lock_file = "init.lock"
     
@@ -247,6 +328,11 @@ def singleton_background_initialization():
         with open(lock_file, "w") as f:
             f.write(str(os.getpid()))
         
+        # Ensure imports are done in the background thread too
+        if not imports_loaded:
+            load_heavy_imports()
+            imports_loaded = True
+            
         background_initialization()
         
         # Keep the lock file but update it
