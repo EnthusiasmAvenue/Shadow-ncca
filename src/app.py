@@ -24,21 +24,34 @@ def healthz():
 
 @app.route('/startup-status')
 def startup_status():
-    global imports_loaded
+    global imports_loaded, background_init_started
+    
+    status = "initializing"
+    if imports_loaded:
+        status = "ready"
+    elif not background_init_started:
+        status = "pending_start"
+        
     return {
+        "status": status,
         "imports_loaded": imports_loaded,
-        "db_connected": db_session is not None,
-        "model_ready": check_model_ready() if predictor else False
-    }
+        "background_thread_started": background_init_started
+    }, 200
 
 # Now import the rest lazily
 def load_heavy_imports():
     global pd, init_db, Game, Prediction, DataLoader, APIDataLoader, ScorePredictor
+    print("Loading heavy libraries (pandas, sqlalchemy, etc.)...")
     import pandas as pd
+    import database
     from database import init_db, Game, Prediction
+    import data_loader
     from data_loader import DataLoader
+    import api_loader
     from api_loader import APIDataLoader
+    import model
     from model import ScorePredictor
+    print("Heavy libraries loaded.")
 
 # Placeholder globals
 pd = None
@@ -68,17 +81,12 @@ def setup_and_check_access():
     if access_key and session.get('authorized') != access_key:
         return redirect(url_for('login'))
 
-    # 2. Lazy loading (only if authorized and not a static/health path)
-    if not imports_loaded:
-        # If imports aren't ready, we don't want to block the request thread and hit OOM
-        # But we also can't show the page. 
-        # For now, let's try to load them but with a warning.
-        print(f"Request to {request.path} triggered lazy loading...")
-        try:
-            get_loaders()
-            get_predictor()
-        except Exception as e:
-            print(f"Lazy loading error: {e}")
+    # 2. Ensure everything is loaded (Lazy but safe)
+    try:
+        get_loaders()
+        get_predictor()
+    except Exception as e:
+        print(f"Lazy loading error: {e}")
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -332,6 +340,9 @@ threading.Thread(target=singleton_background_initialization, daemon=True).start(
 
 @app.route('/')
 def home():
+    # Ensure initialized
+    db_session = get_db_session()
+    
     # Fetch some summary stats for the home page
     stats = {
         'total_games': 0,
@@ -369,6 +380,15 @@ def predict():
     try:
         print("Entered /predict route")
         
+        # Ensure components are loaded
+        db_session = get_db_session()
+        mock_loader, api_loader, current_loader = get_loaders()
+        predictor = get_predictor()
+        
+        if not db_session or not predictor or not mock_loader:
+            flash("System is still initializing AI model. Please try again in 30 seconds.", "info")
+            return render_template('predictions.html', predictions=[], source="Initializing...")
+
         # --- AUTOMATED RETRAINING CHECK ---
         # If we have new finished games since the last training, retrain.
         last_train_file = os.path.join(BASE_DIR, 'last_train.txt')
@@ -560,6 +580,9 @@ def predict():
 
 
 def dedupe_games():
+    db_session = get_db_session()
+    if not db_session:
+        return
     games = db_session.query(Game).order_by(Game.date.asc()).all()
     keep = {}
     for g in games:
@@ -581,6 +604,11 @@ def dedupe_games():
 
 @app.route('/history')
 def history():
+    db_session = get_db_session()
+    if not db_session:
+        flash("Database not ready", "warning")
+        return render_template('history.html', records=[], stats={}, team_rows=[])
+        
     auto_update_results()
     try:
         dedupe_games()
@@ -735,6 +763,9 @@ def history():
 
 @app.route('/export-history.csv', methods=['GET'])
 def export_history_csv():
+    db_session = get_db_session()
+    if not db_session:
+        return "Database not ready", 503
     preds = (
         db_session.query(Prediction)
         .join(Game)
@@ -767,6 +798,9 @@ def export_history_csv():
 
 @app.route('/export-history.json', methods=['GET'])
 def export_history_json():
+    db_session = get_db_session()
+    if not db_session:
+        return "Database not ready", 503
     preds = (
         db_session.query(Prediction)
         .join(Game)
@@ -792,6 +826,9 @@ def export_history_json():
     return jsonify(rows)
 
 def auto_update_results():
+    db_session = get_db_session()
+    if not db_session:
+        return 0
     now = datetime.now(ZoneInfo("UTC"))
     # Query games that are NOT finished yet
     open_games = db_session.query(Game).filter(Game.status != 'finished').all()
