@@ -1,5 +1,10 @@
 from flask import Flask, render_template, request, flash, session, redirect, url_for
 import os
+import sys
+
+# Add the current directory to sys.path so it can find database, data_loader, etc.
+sys.path.append(os.path.dirname(__file__))
+
 import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -11,8 +16,15 @@ from model import ScorePredictor
 
 load_dotenv()
 
-app = Flask(__name__)
+app = Flask(__name__, 
+            template_folder=os.path.join(os.path.dirname(__file__), 'templates'),
+            static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'shadow_ncca_secret_v1')
+
+@app.errorhandler(500)
+def internal_error(error):
+    import traceback
+    return f"500 Error: {str(error)}<br><pre>{traceback.format_exc()}</pre>", 500
 
 @app.before_request
 def check_access():
@@ -51,7 +63,7 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 SRC_DIR = os.path.dirname(__file__)
 
 # Initialize components
-session = init_db()
+db_session = init_db()
 predictor = ScorePredictor()
 api_key = os.getenv('ODDS_API_KEY')
 tz_wat = ZoneInfo("Africa/Lagos")
@@ -74,7 +86,7 @@ def inject_globals():
     return {'os_getenv': os.getenv}
 
 # Initialize Loaders
-mock_loader = DataLoader(session)
+mock_loader = DataLoader(db_session)
 if api_key:
     api_loader = APIDataLoader(api_key)
     current_loader = api_loader
@@ -102,8 +114,6 @@ def startup_load_stats():
         mock_loader.build_team_bias_from_db()
         mock_loader.analyze_prediction_performance()
 
-startup_load_stats()
-
 # Improved check for model readiness
 def check_model_ready():
     if not predictor.is_trained: return False
@@ -119,26 +129,52 @@ def check_model_ready():
         return False
     return True
 
-if not check_model_ready():
-    print("Training initial model (scaler or features missing)...")
-    db_df = mock_loader.fetch_db_training_data(min_rows=50)
-    if not db_df.empty:
-        X, y = mock_loader.prepare_features(db_df)
-    else:
-        history_df = mock_loader.fetch_historical_data(num_games=500)
-        X, y = mock_loader.prepare_features(history_df)
-    predictor.train(X, y)
+@app.route('/healthz')
+def healthz():
+    try:
+        # Check DB
+        db_session.query(Game).limit(1).all()
+        # Check Model
+        model_ready = check_model_ready()
+        return {
+            "status": "ok",
+            "database": "connected",
+            "model_ready": model_ready,
+            "python_version": sys.version
+        }, 200
+    except Exception as e:
+        return {"status": "error", "message": str(e)}, 500
+
+# Wrap startup logic to prevent crash
+def background_initialization():
+    try:
+        startup_load_stats()
+        if not check_model_ready():
+            print("Training initial model (scaler or features missing)...")
+            db_df = mock_loader.fetch_db_training_data(min_rows=50)
+            if not db_df.empty:
+                X, y = mock_loader.prepare_features(db_df)
+            else:
+                history_df = mock_loader.fetch_historical_data(num_games=500)
+                X, y = mock_loader.prepare_features(history_df)
+            predictor.train(X, y)
+    except Exception as e:
+        print(f"STARTUP ERROR: {e}")
+
+# Run initialization in a thread to not block gunicorn port binding
+import threading
+threading.Thread(target=background_initialization, daemon=True).start()
 
 @app.route('/')
 def home():
     # Fetch some summary stats for the home page
     try:
-        total_games = session.query(Game).filter(Game.status == 'finished').count()
-        total_preds = session.query(Prediction).join(Game).filter(Game.status == 'finished').count()
+        total_games = db_session.query(Game).filter(Game.status == 'finished').count()
+        total_preds = db_session.query(Prediction).join(Game).filter(Game.status == 'finished').count()
         
         # Calculate accuracy
         wins = 0
-        all_finished = session.query(Prediction).join(Game).filter(Game.status == 'finished').all()
+        all_finished = db_session.query(Prediction).join(Game).filter(Game.status == 'finished').all()
         for p in all_finished:
             if p.predicted_class == p.game.result:
                 wins += 1
@@ -196,17 +232,17 @@ def predict():
             today_end = datetime.combine(datetime.now().date(), time.max)
             
             preds_to_delete = (
-                session.query(Prediction)
+                db_session.query(Prediction)
                 .join(Game)
                 .filter(Game.date >= today_start, Game.date <= today_end)
                 .all()
             )
             print(f"Found {len(preds_to_delete)} predictions to clear")
             for p in preds_to_delete:
-                session.delete(p)
-            session.commit()
+                db_session.delete(p)
+            db_session.commit()
         except Exception as e:
-            session.rollback()
+            db_session.rollback()
             print(f"Error clearing today's predictions: {e}")
 
         pick_filter = request.args.get('pick')
@@ -257,7 +293,7 @@ def predict():
                 
                 game_date = dt # Already converted to UTC datetime object above
 
-                game = session.query(Game).filter_by(
+                game = db_session.query(Game).filter_by(
                     date=game_date,
                     team_home=row['team_home'],
                     team_away=row['team_away']
@@ -270,11 +306,11 @@ def predict():
                         team_away=row['team_away'],
                         over_under_line=row['over_under_line']
                     )
-                    session.add(game)
-                    session.flush() # Ensure ID is populated
+                    db_session.add(game)
+                    db_session.flush() # Ensure ID is populated
 
                 existing_pred = (
-                    session.query(Prediction)
+                    db_session.query(Prediction)
                     .filter(Prediction.game_id == game.id)
                     .order_by(Prediction.created_at.asc())
                     .first()
@@ -324,7 +360,7 @@ def predict():
                         explanation=result.get('explanation', ''),
                         model_version="v2"
                     )
-                    session.add(prediction_record)
+                    db_session.add(prediction_record)
                     
                     predictions.append({
                         'matchup': f"{row['team_home']} vs {row['team_away']}",
@@ -336,7 +372,7 @@ def predict():
                         'diff': result['diff'],
                         'explanation': result.get('explanation', '')
                     })
-            session.commit()
+            db_session.commit()
         
         print(f"Generated {len(predictions)} predictions")
         
@@ -359,7 +395,7 @@ def predict():
 
 
 def dedupe_games():
-    games = session.query(Game).order_by(Game.date.asc()).all()
+    games = db_session.query(Game).order_by(Game.date.asc()).all()
     keep = {}
     for g in games:
         key = (g.date, g.team_home, g.team_away)
@@ -374,8 +410,8 @@ def dedupe_games():
                 canonical.score_away = g.score_away
                 canonical.total_score = g.total_score
                 canonical.result = g.result
-            session.delete(g)
-    session.commit()
+            db_session.delete(g)
+    db_session.commit()
 
 
 @app.route('/history')
@@ -388,7 +424,7 @@ def history():
     
     # 1. Fetch ALL predictions for overall stats
     all_predictions = (
-        session.query(Prediction)
+        db_session.query(Prediction)
         .join(Game)
         .filter((Game.total_score != None) | (Game.status == 'live'))
         .order_by(Game.date.desc(), Prediction.created_at.desc())
@@ -495,8 +531,8 @@ def history():
     try:
         from database import Metric
         m = Metric(mae=None, win_rate=total_win_rate, note="daily")
-        session.add(m)
-        session.commit()
+        db_session.add(m)
+        db_session.commit()
     except Exception:
         pass
 
@@ -535,7 +571,7 @@ def history():
 @app.route('/export-history.csv', methods=['GET'])
 def export_history_csv():
     preds = (
-        session.query(Prediction)
+        db_session.query(Prediction)
         .join(Game)
         .filter(Game.total_score != None)
         .order_by(Game.date.desc(), Prediction.created_at.asc())
@@ -567,7 +603,7 @@ def export_history_csv():
 @app.route('/export-history.json', methods=['GET'])
 def export_history_json():
     preds = (
-        session.query(Prediction)
+        db_session.query(Prediction)
         .join(Game)
         .filter(Game.total_score != None)
         .order_by(Game.date.desc(), Prediction.created_at.asc())
@@ -593,7 +629,7 @@ def export_history_json():
 def auto_update_results():
     now = datetime.now(ZoneInfo("UTC"))
     # Query games that are NOT finished yet
-    open_games = session.query(Game).filter(Game.status != 'finished').all()
+    open_games = db_session.query(Game).filter(Game.status != 'finished').all()
     updated = 0
     if api_loader:
         scores_df = api_loader.fetch_recent_scores(days=3)
@@ -678,7 +714,7 @@ def auto_update_results():
                     g.total_score = g.score_home + g.score_away
                     updated += 1
     if updated:
-        session.commit()
+        db_session.commit()
         try:
             maybe_retrain(updated_count=updated)
         except Exception:
@@ -735,14 +771,6 @@ def reload_stats():
             return redirect('/')
     flash("No team_stats.csv found.")
     return redirect('/')
-
-@app.route('/healthz', methods=['GET'])
-def healthz():
-    try:
-        session.query(Game).limit(1).all()
-        return "ok", 200
-    except Exception:
-        return "db error", 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
