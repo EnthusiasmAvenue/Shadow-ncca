@@ -82,6 +82,10 @@ def init_db(db_path=None):
         )
     else:
         url = db_path or os.getenv('DATABASE_URL') or 'sqlite:///ncaa_predictions.db'
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+pg8000://", 1)
+        elif url.startswith("postgresql://") and "+pg8000" not in url:
+            url = url.replace("postgresql://", "postgresql+pg8000://", 1)
         engine = create_engine(url, pool_pre_ping=True)
     Base.metadata.create_all(engine)
     
