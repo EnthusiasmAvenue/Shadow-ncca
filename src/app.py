@@ -62,6 +62,7 @@ DataLoader = None
 APIDataLoader = None
 ScorePredictor = None
 imports_loaded = False
+background_init_started = False
 
 load_dotenv()
 
@@ -187,7 +188,10 @@ def inject_globals():
 
 # Ensure model is trained AND team stats are loaded on startup
 def startup_load_stats():
-    get_loaders()
+    mock_loader, _, _ = get_loaders()
+    if not mock_loader:
+        print("ERROR: Could not get mock_loader in startup_load_stats")
+        return
     import os
     print("--- STARTUP FILE DISCOVERY ---")
     cwd = os.getcwd()
@@ -276,12 +280,16 @@ def background_initialization():
     try:
         # Initialize everything
         print("Initializing database and loaders in background...")
-        get_loaders()
-        get_predictor()
+        mock_loader, api_loader, current_loader = get_loaders()
+        predictor = get_predictor()
         
         startup_load_stats()
         if not check_model_ready():
             print("Model not ready. Starting initial training sequence...")
+            if not mock_loader:
+                print("ERROR: mock_loader is None, cannot train model.")
+                return
+                
             db_df = mock_loader.fetch_db_training_data(min_rows=50)
             if not db_df.empty:
                 print(f"Training on {len(db_df)} database games.")
@@ -291,8 +299,11 @@ def background_initialization():
                 history_df = mock_loader.fetch_historical_data(num_games=500)
                 X, y = mock_loader.prepare_features(history_df)
             
-            mae = predictor.train(X, y)
-            print(f"Initial training complete. Model MAE: {mae:.2f}")
+            if predictor:
+                mae = predictor.train(X, y)
+                print(f"Initial training complete. Model MAE: {mae:.2f}")
+            else:
+                print("ERROR: Predictor is None, cannot train.")
         else:
             print("Model loaded and ready for predictions.")
     except Exception as e:
@@ -304,7 +315,8 @@ def background_initialization():
 import time
 
 def singleton_background_initialization():
-    global imports_loaded
+    global imports_loaded, background_init_started
+    background_init_started = True
     # Simple file lock to ensure only one worker runs initialization
     lock_file = "init.lock"
     
@@ -827,6 +839,7 @@ def export_history_json():
 
 def auto_update_results():
     db_session = get_db_session()
+    mock_loader, api_loader, current_loader = get_loaders()
     if not db_session:
         return 0
     now = datetime.now(ZoneInfo("UTC"))
@@ -927,6 +940,12 @@ def auto_update_results():
 last_retrain_time = None
 def maybe_retrain(updated_count=0):
     global last_retrain_time
+    mock_loader, _, _ = get_loaders()
+    predictor = get_predictor()
+    
+    if not mock_loader or not predictor:
+        return
+
     from datetime import datetime, timedelta
     now = datetime.now(ZoneInfo("UTC"))
     
@@ -962,6 +981,11 @@ def auto_update_endpoint():
 
 @app.route('/reload-stats', methods=['POST'])
 def reload_stats():
+    mock_loader, _, _ = get_loaders()
+    if not mock_loader:
+        flash("System initializing, try again later.")
+        return redirect('/')
+        
     from flask import redirect
     csv_paths = [
         os.path.join(BASE_DIR, 'team_stats.csv'),
