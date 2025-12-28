@@ -254,31 +254,6 @@ def check_model_ready():
         return False
     return True
 
-@app.route('/healthz')
-def healthz():
-    try:
-        # Quick DB check only if initialized
-        db_status = "not_initialized"
-        if db_session:
-            db_session.query(Game).limit(1).all()
-            db_status = "connected"
-        
-        # Check Model
-        model_ready = False
-        if predictor:
-            model_ready = check_model_ready()
-        
-        return {
-            "status": "ok",
-            "database": db_status,
-            "model_ready": model_ready,
-            "teams_loaded": len(mock_loader.team_stats) if mock_loader else 0,
-            "python_version": sys.version
-        }, 200
-    except Exception as e:
-        # Still return 200 to keep Render happy, but show error
-        return {"status": "starting", "message": str(e)}, 200
-
 # Wrap startup logic to prevent crash
 def background_initialization():
     try:
