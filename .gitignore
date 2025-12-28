@@ -1,5 +1,4 @@
 # Local database and model
-ncaa_predictions.db
 test_ncaa.db
 model.pkl
 last_train.txt
@@ -20,8 +19,6 @@ __pycache__/
 venv/
 .venv/
 
-# Deployment scripts (optional to ignore, but good for clean repo)
+# Deployment scripts
 deploy_cloud_run.ps1
 fly.toml
-Dockerfile
-.dockerignore
